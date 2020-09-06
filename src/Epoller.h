@@ -4,50 +4,223 @@
 #include <string>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/epoll.h>
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
 #include <memory>
+#include <unordered_map>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <iostream>
 
-class EpollCallback {
+using namespace std;
+
+#define MAX_EVENTS 10
+#define MAX_PENDING 1024
+#define BUFFER_SIZE 1024
+
+class Handler
+{
 public:
-	typedef std::shared_ptr<EpollCallback> Ptr;
-	EpollCallback() {};
-	virtual ~EpollCallback() {};
-	virtual void doEvent(struct epoll_event*) {};
+	virtual ~Handler() {}
+	virtual int handle(epoll_event e) = 0;
 };
 
-class Epoller {
+class IOLoop
+{
 public:
-	typedef std::shared_ptr<Epoller> Ptr;
-	Epoller() : epollfd(-1) {}
-	virtual ~Epoller() { close(epollfd); };
-	int initServer(EpollCallback* cb, std::string hostName, int port, int socketType = SOCK_STREAM);
-	int connectServer(EpollCallback* cb, std::string hostName, int port, int socketType = SOCK_STREAM);
-	int socketBind(std::string hostName, int port, int socketType = SOCK_STREAM);
-	std::string getIpByHost(std::string hostName, int port);
-	void initEpool(int maxEvents = 1024);
+	static IOLoop *getInstance()
+	{
+		static IOLoop instance;
+		return &instance;
+	}
 
-	/**
-	 * state:
-	 * EPOLLIN ：表示对应的文件描述符可以读（包括对端SOCKET正常关闭）；
-	 * EPOLLOUT：表示对应的文件描述符可以写；
-	 * EPOLLPRI：表示对应的文件描述符有紧急的数据可读（这里应该表示有带外数据到来）；
-	 * EPOLLERR：表示对应的文件描述符发生错误；
-	 * EPOLLHUP：表示对应的文件描述符被挂断；
-	 * EPOLLET： 将EPOLL设为边缘触发(Edge Triggered)模式，这是相对于水平触发(Level Triggered)来说的。
-	 * EPOLLONESHOT：只监听一次事件，当监听完这次事件之后，如果还需要继续监听这个socket的话，需要再次把这个socket加入到EPOLL队列里
-	 */
-	bool addEvent(int fd, int state, EpollCallback* cb);
-	bool removeEvent(int fd, int state);
-	bool modifyEvent(int fd, int state, EpollCallback* cb);
-	void makeNonBlocking(int sfd);
-	void working(int maxEvents, int timeout = 100);
-	static std::string EpollFormat(std::string fmt, ...);
-	
+	void start()
+	{
+		for (;;)
+		{
+			int nfds = epoll_wait(this->epfd, this->events, MAX_EVENTS, -1 /* Timeout */);
+
+			for (int i = 0; i < nfds; ++i)
+			{
+				int fd = this->events[i].data.fd;
+				Handler *h = handlers[fd];
+				h->handle(this->events[i]);
+			}
+		}
+	}
+
+	void addHandler(int fd, Handler *handler, unsigned int events)
+	{
+		handlers[fd] = handler;
+		epoll_event e;
+		e.data.fd = fd;
+		e.events = events;
+
+		if (epoll_ctl(this->epfd, EPOLL_CTL_ADD, fd, &e) < 0)
+		{
+			printf("Failed to insert handler to epoll");
+		}
+	}
+
+	void modifyHandler(int fd, unsigned int events) {}
+
+	void removeHandler(int fd) {}
+
 private:
-	int epollfd;
+	IOLoop()
+	{
+		this->epfd = epoll_create(this->EPOLL_EVENTS);
+
+		if (this->epfd < 0)
+		{
+			printf("Failed to create epoll");
+			exit(1);
+		}
+	}
+
+private:
+	int epfd;
+	int EPOLL_EVENTS = 10;
+	std::unordered_map<int, Handler *> handlers;
+	struct epoll_event events[MAX_EVENTS];
 };
+
+class EchoHandler : public Handler
+{
+public:
+	EchoHandler(int clientFd, struct sockaddr_in client_addr)
+	{
+		fd = clientFd;
+	}
+	virtual int handle(epoll_event e)
+	{
+		cout << "e.events=" << e.events << endl;
+		if (e.events & EPOLLHUP)
+		{
+			IOLoop::getInstance()->removeHandler(fd);
+			return -1;
+		}
+
+		if (e.events & EPOLLERR)
+		{
+			return -1;
+		}
+
+		if (e.events & EPOLLOUT)
+		{
+			if (received > 0)
+			{
+				cout << "Writing: " << buffer << endl;
+				if (send(fd, buffer, received, 0) != received)
+				{
+					printf("Error writing to socket");
+				}
+			}
+
+			IOLoop::getInstance()->modifyHandler(fd, EPOLLIN);
+		}
+
+		if (e.events & EPOLLIN)
+		{
+			if ((received = recv(fd, buffer, BUFFER_SIZE, 0)) < 0)
+			{
+				printf("Error reading from socket");
+			}
+			else if (received > 0)
+			{
+				buffer[received] = 0;
+				cout << "Reading: " << buffer << endl;
+			}
+
+			if (received > 0)
+			{
+				IOLoop::getInstance()->modifyHandler(fd, EPOLLOUT);
+			}
+			else
+			{
+				IOLoop::getInstance()->removeHandler(fd);
+			}
+		}
+
+		return 0;
+	}
+
+private:
+	int fd;
+	int received = 0;
+	char buffer[BUFFER_SIZE];
+};
+
+class ServerHandler : Handler
+{
+public:
+	void setnonblocking(int fd)
+	{
+		int flags = fcntl(fd, F_GETFL, 0);
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+	}
+
+	ServerHandler(int port)
+	{
+		struct sockaddr_in addr;
+		memset(&addr, 0, sizeof(addr));
+
+		if ((fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
+		{
+			printf("Failed to create server socket");
+			exit(1);
+		}
+
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = htonl(INADDR_ANY);
+		addr.sin_port = htons(port);
+
+		if (bind(fd, (struct sockaddr *)&addr,
+				 sizeof(addr)) < 0)
+		{
+			printf("Failed to bind server socket");
+			exit(1);
+		}
+
+		if (listen(fd, MAX_PENDING) < 0)
+		{
+			printf("Failed to listen on server socket");
+			exit(1);
+		}
+		setnonblocking(fd);
+
+		IOLoop::getInstance()->addHandler(fd, this, EPOLLIN);
+	}
+
+	virtual int handle(epoll_event e)
+	{
+		struct sockaddr_in client_addr;
+		socklen_t ca_len = sizeof(client_addr);
+
+		int client = accept(fd, (struct sockaddr *)&client_addr,
+							&ca_len);
+
+		if (client < 0)
+		{
+			printf("Error accepting connection");
+			return -1;
+		}
+
+		cout << "Client connected: " << inet_ntoa(client_addr.sin_addr) << endl;
+		Handler* clientHandler = new EchoHandler(client, client_addr);
+		IOLoop::getInstance()->addHandler(client, clientHandler, 0 | EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
+		return 0;
+	}
+
+private:
+	int fd;
+};
+
+
 
 #endif /* __EPOLLER_H__ */
