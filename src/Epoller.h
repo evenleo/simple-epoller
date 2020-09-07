@@ -50,7 +50,7 @@ public:
 	{
 		const uint64_t MAX_EVENTS = 10;
 		epoll_event events[MAX_EVENTS];
-		while (!stop_)
+		while (true)
 		{
 			// -1 只没有事件一直阻塞
 			int nfds = epoll_wait(epfd_, events, MAX_EVENTS, -1/*Timeout*/);
@@ -62,7 +62,6 @@ public:
 			}
 		}
 	}
-	void stop() { stop_ = true; }
 
 	void addHandler(int fd, Handler* handler, unsigned int events)
 	{
@@ -104,7 +103,6 @@ private:
 
 private:
 	int epfd_;
-	bool stop_ = false;
 	std::unordered_map<int, Handler*> handlers_;
 };
 
@@ -156,9 +154,8 @@ public:
 			if (received > 0) {
 				eventLoop::getInstance()->modifyHandler(fd, EPOLLOUT);
 			} else {
-				eventLoop::getInstance()->stop();				
 				std::cout << "disconnect fd=" << fd << std::endl;
-				// eventLoop::getInstance()->removeHandler(fd);
+				eventLoop::getInstance()->removeHandler(fd);
 			}
 		}
 
