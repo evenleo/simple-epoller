@@ -1,6 +1,8 @@
 #ifndef __EPOLLER_H__
 #define __EPOLLER_H__
 
+// https://www.cnblogs.com/Anker/archive/2013/08/17/3263780.html
+
 #include <string>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -40,17 +42,19 @@ public:
 
 	void start()
 	{
-		const uint64_t MAX_EVENTS = 256;
+		const uint64_t MAX_EVENTS = 10;
 		epoll_event events[MAX_EVENTS];
 		for (;;)
 		{
-			int nfds = epoll_wait(this->epfd, events, MAX_EVENTS, 100 /* Timeout */);
+			// -1 只没有事件一直阻塞
+			int nfds = epoll_wait(this->epfd, events, MAX_EVENTS, -1/*Timeout*/);
 
 			for (int i = 0; i < nfds; ++i)
 			{
 				int fd = events[i].data.fd;
 				Handler *h = handlers[fd];
-				h->handle(events[i]);
+				if (h)
+					h->handle(events[i]);
 			}
 		}
 	}
@@ -144,7 +148,7 @@ public:
 
 			if (received > 0)
 			{
-				IOLoop::getInstance()->modifyHandler(fd, EPOLLOUT | EPOLLET);
+				IOLoop::getInstance()->modifyHandler(fd, EPOLLOUT);
 			}
 			else
 			{
@@ -199,7 +203,7 @@ public:
 		}
 		setnonblocking(fd);
 
-		IOLoop::getInstance()->addHandler(fd, this, 0 | EPOLLIN | EPOLLET);
+		IOLoop::getInstance()->addHandler(fd, this, EPOLLIN);
 	}
 
 	virtual int handle(epoll_event e)
@@ -219,7 +223,7 @@ public:
 
 		cout << "Client connected: " << inet_ntoa(client_addr.sin_addr) << endl;
 		Handler* clientHandler = new EchoHandler(client, client_addr);
-		IOLoop::getInstance()->addHandler(client, clientHandler, 0 | EPOLLET | EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
+		IOLoop::getInstance()->addHandler(client, clientHandler, EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
 		return 0;
 	}
 
