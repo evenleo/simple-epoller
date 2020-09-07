@@ -19,7 +19,6 @@
 
 using namespace std;
 
-#define MAX_EVENTS 10
 #define MAX_PENDING 1024
 #define BUFFER_SIZE 1024
 
@@ -41,15 +40,17 @@ public:
 
 	void start()
 	{
+		const uint64_t MAX_EVENTS = 256;
+		epoll_event events[MAX_EVENTS];
 		for (;;)
 		{
-			int nfds = epoll_wait(this->epfd, this->events, MAX_EVENTS, -1 /* Timeout */);
+			int nfds = epoll_wait(this->epfd, events, MAX_EVENTS, 100 /* Timeout */);
 
 			for (int i = 0; i < nfds; ++i)
 			{
-				int fd = this->events[i].data.fd;
+				int fd = events[i].data.fd;
 				Handler *h = handlers[fd];
-				h->handle(this->events[i]);
+				h->handle(events[i]);
 			}
 		}
 	}
@@ -67,7 +68,12 @@ public:
 		}
 	}
 
-	void modifyHandler(int fd, unsigned int events) {}
+	void modifyHandler(int fd, unsigned int events) 
+	{
+		struct epoll_event event;
+		event.events = events;
+		epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event);
+	}
 
 	void removeHandler(int fd) {}
 
@@ -87,7 +93,6 @@ private:
 	int epfd;
 	int EPOLL_EVENTS = 10;
 	std::unordered_map<int, Handler *> handlers;
-	struct epoll_event events[MAX_EVENTS];
 };
 
 class EchoHandler : public Handler
@@ -139,7 +144,7 @@ public:
 
 			if (received > 0)
 			{
-				IOLoop::getInstance()->modifyHandler(fd, EPOLLOUT);
+				IOLoop::getInstance()->modifyHandler(fd, EPOLLOUT | EPOLLET);
 			}
 			else
 			{
@@ -194,11 +199,12 @@ public:
 		}
 		setnonblocking(fd);
 
-		IOLoop::getInstance()->addHandler(fd, this, EPOLLIN);
+		IOLoop::getInstance()->addHandler(fd, this, 0 | EPOLLIN | EPOLLET);
 	}
 
 	virtual int handle(epoll_event e)
 	{
+		cout << "server events=" << e.events << endl;
 		struct sockaddr_in client_addr;
 		socklen_t ca_len = sizeof(client_addr);
 
@@ -213,7 +219,7 @@ public:
 
 		cout << "Client connected: " << inet_ntoa(client_addr.sin_addr) << endl;
 		Handler* clientHandler = new EchoHandler(client, client_addr);
-		IOLoop::getInstance()->addHandler(client, clientHandler, 0 | EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
+		IOLoop::getInstance()->addHandler(client, clientHandler, 0 | EPOLLET | EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
 		return 0;
 	}
 
