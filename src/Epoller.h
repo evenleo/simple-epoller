@@ -12,63 +12,67 @@
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
-#include <memory>
 #include <unordered_map>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <iostream>
-
-using namespace std;
+#include <functional>
 
 #define MAX_PENDING 1024
 #define BUFFER_SIZE 1024
 
-class Handler
-{
+class Handler {
 public:
 	virtual ~Handler() {}
 	virtual int handle(epoll_event e) = 0;
 };
 
-class IOLoop
-{
+/**
+ * epoll 事件轮询
+ */ 
+class eventLoop {
 public:
-	static IOLoop *getInstance()
+	static eventLoop *getInstance()
 	{
-		static IOLoop instance;
+		static eventLoop instance;
 		return &instance;
+	}
+
+	~eventLoop() 
+	{
+		for (auto it : handlers_) {
+			delete it.second;
+		}
 	}
 
 	void start()
 	{
 		const uint64_t MAX_EVENTS = 10;
 		epoll_event events[MAX_EVENTS];
-		for (;;)
+		while (!stop_)
 		{
 			// -1 只没有事件一直阻塞
-			int nfds = epoll_wait(this->epfd, events, MAX_EVENTS, -1/*Timeout*/);
+			int nfds = epoll_wait(epfd_, events, MAX_EVENTS, -1/*Timeout*/);
 
-			for (int i = 0; i < nfds; ++i)
-			{
+			for (int i = 0; i < nfds; ++i) {
 				int fd = events[i].data.fd;
-				Handler *h = handlers[fd];
-				if (h)
-					h->handle(events[i]);
+				Handler* handler = handlers_[fd];
+				handler->handle(events[i]);
 			}
 		}
 	}
+	void stop() { stop_ = true; }
 
-	void addHandler(int fd, Handler *handler, unsigned int events)
+	void addHandler(int fd, Handler* handler, unsigned int events)
 	{
-		handlers[fd] = handler;
+		handlers_[fd] = handler;
 		epoll_event e;
 		e.data.fd = fd;
 		e.events = events;
 
-		if (epoll_ctl(this->epfd, EPOLL_CTL_ADD, fd, &e) < 0)
-		{
-			printf("Failed to insert handler to epoll");
+		if (epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &e) < 0) {
+			std::cout << "Failed to insert handler to epoll" << std::endl;
 		}
 	}
 
@@ -76,47 +80,47 @@ public:
 	{
 		struct epoll_event event;
 		event.events = events;
-		epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event);
+		epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &event);
 	}
 
-	void removeHandler(int fd) {}
+	void removeHandler(int fd) 
+	{
+		Handler* handler = handlers_[fd];
+		handlers_.erase(fd);
+		delete handler;
+		//将fd从epoll堆删除
+		epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, NULL);
+	}
 
 private:
-	IOLoop()
+	eventLoop()
 	{
-		this->epfd = epoll_create(this->EPOLL_EVENTS);
-
-		if (this->epfd < 0)
-		{
-			printf("Failed to create epoll");
+		epfd_ = epoll_create1(0);  //flag=0 等价于epll_craete
+		if (epfd_ < 0) {
+			std::cout << "Failed to create epoll" << std::endl;
 			exit(1);
 		}
 	}
 
 private:
-	int epfd;
-	int EPOLL_EVENTS = 10;
-	std::unordered_map<int, Handler *> handlers;
+	int epfd_;
+	bool stop_ = false;
+	std::unordered_map<int, Handler*> handlers_;
 };
 
-class EchoHandler : public Handler
-{
+class EchoHandler : public Handler {
 public:
-	EchoHandler(int clientFd, struct sockaddr_in client_addr)
+	EchoHandler() {}
+	virtual int handle(epoll_event e) override
 	{
-		fd = clientFd;
-	}
-	virtual int handle(epoll_event e)
-	{
-		cout << "e.events=" << e.events << endl;
-		if (e.events & EPOLLHUP)
-		{
-			IOLoop::getInstance()->removeHandler(fd);
+		std::cout << "e.events=" << e.events << std::endl;
+		int fd = e.data.fd;
+		if (e.events & EPOLLHUP) {
+			eventLoop::getInstance()->removeHandler(fd);
 			return -1;
 		}
 
-		if (e.events & EPOLLERR)
-		{
+		if (e.events & EPOLLERR) {
 			return -1;
 		}
 
@@ -124,35 +128,37 @@ public:
 		{
 			if (received > 0)
 			{
-				cout << "Writing: " << buffer << endl;
+				std::cout << "Writing: " << buffer << std::endl;
 				if (send(fd, buffer, received, 0) != received)
 				{
-					printf("Error writing to socket");
+					std::cout << "Error writing to socket" << std::endl;
 				}
 			}
 
-			IOLoop::getInstance()->modifyHandler(fd, EPOLLIN);
+			eventLoop::getInstance()->modifyHandler(fd, EPOLLIN);
 		}
 
 		if (e.events & EPOLLIN)
 		{
-			if ((received = recv(fd, buffer, BUFFER_SIZE, 0)) < 0)
-			{
-				printf("Error reading from socket");
+			std::cout << "read" << std::endl;
+			received = recv(fd, buffer, BUFFER_SIZE, 0);
+			if (received < 0) {
+				std::cout << "Error reading from socket" << std::endl;
 			}
-			else if (received > 0)
-			{
+			else if (received > 0) {
 				buffer[received] = 0;
-				cout << "Reading: " << buffer << endl;
+				std::cout << "Reading: " << buffer << std::endl;
+				if (strcmp(buffer, "stop") == 0) {
+					std::cout << "stop----" << std::endl;
+				}
 			}
 
-			if (received > 0)
-			{
-				IOLoop::getInstance()->modifyHandler(fd, EPOLLOUT);
-			}
-			else
-			{
-				IOLoop::getInstance()->removeHandler(fd);
+			if (received > 0) {
+				eventLoop::getInstance()->modifyHandler(fd, EPOLLOUT);
+			} else {
+				eventLoop::getInstance()->stop();				
+				std::cout << "disconnect fd=" << fd << std::endl;
+				// eventLoop::getInstance()->removeHandler(fd);
 			}
 		}
 
@@ -160,28 +166,21 @@ public:
 	}
 
 private:
-	int fd;
 	int received = 0;
 	char buffer[BUFFER_SIZE];
 };
 
-class ServerHandler : Handler
-{
+class ServerHandler : public Handler {
 public:
-	void setnonblocking(int fd)
-	{
-		int flags = fcntl(fd, F_GETFL, 0);
-		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-	}
-
 	ServerHandler(int port)
 	{
+		int fd;
 		struct sockaddr_in addr;
 		memset(&addr, 0, sizeof(addr));
 
 		if ((fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
 		{
-			printf("Failed to create server socket");
+			std::cout << "Failed to create server socket" << std::endl;
 			exit(1);
 		}
 
@@ -189,46 +188,48 @@ public:
 		addr.sin_addr.s_addr = htonl(INADDR_ANY);
 		addr.sin_port = htons(port);
 
-		if (bind(fd, (struct sockaddr *)&addr,
-				 sizeof(addr)) < 0)
+		if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
 		{
-			printf("Failed to bind server socket");
+			std::cout << "Failed to bind server socket" << std::endl;
 			exit(1);
 		}
 
 		if (listen(fd, MAX_PENDING) < 0)
 		{
-			printf("Failed to listen on server socket");
+			std::cout << "Failed to listen on server socket" << std::endl;
 			exit(1);
 		}
 		setnonblocking(fd);
 
-		IOLoop::getInstance()->addHandler(fd, this, EPOLLIN);
+		eventLoop::getInstance()->addHandler(fd, this, EPOLLIN);
 	}
 
-	virtual int handle(epoll_event e)
+	virtual int handle(epoll_event e) override
 	{
-		cout << "server events=" << e.events << endl;
+		int fd = e.data.fd;
 		struct sockaddr_in client_addr;
 		socklen_t ca_len = sizeof(client_addr);
 
-		int client = accept(fd, (struct sockaddr *)&client_addr,
-							&ca_len);
+		int client = accept(fd, (struct sockaddr*)&client_addr, &ca_len);
 
 		if (client < 0)
 		{
-			printf("Error accepting connection");
+			std::cout << "Error accepting connection" << std::endl;
 			return -1;
 		}
 
-		cout << "Client connected: " << inet_ntoa(client_addr.sin_addr) << endl;
-		Handler* clientHandler = new EchoHandler(client, client_addr);
-		IOLoop::getInstance()->addHandler(client, clientHandler, EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
+		std::cout << "accept connected: " << inet_ntoa(client_addr.sin_addr) << std::endl;
+		Handler* clientHandler = new EchoHandler();
+		eventLoop::getInstance()->addHandler(client, clientHandler, EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
 		return 0;
 	}
 
 private:
-	int fd;
+	void setnonblocking(int fd)
+	{
+		int flags = fcntl(fd, F_GETFL, 0);
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+	}
 };
 
 

@@ -9,6 +9,6 @@ using namespace std;
 
 int main() {
 	ServerHandler serverhandler(8877);
-	IOLoop::getInstance()->start();
+	eventLoop::getInstance()->start();
 	return 0;
 }
