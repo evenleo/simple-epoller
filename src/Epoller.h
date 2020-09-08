@@ -1,8 +1,6 @@
 #ifndef __EPOLLER_H__
 #define __EPOLLER_H__
 
-// https://www.cnblogs.com/Anker/archive/2013/08/17/3263780.html
-
 #include <string>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -12,12 +10,11 @@
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
-#include <unordered_map>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <iostream>
-#include <functional>
+#include <unordered_map>
 
 #define MAX_PENDING 1024
 #define BUFFER_SIZE 1024
@@ -31,15 +28,14 @@ public:
 /**
  * epoll 事件轮询
  */ 
-class eventLoop {
+class IOLoop {
 public:
-	static eventLoop *getInstance()
+	static IOLoop *Instance()
 	{
-		static eventLoop instance;
+		static IOLoop instance;
 		return &instance;
 	}
-
-	~eventLoop() 
+	~IOLoop() 
 	{
 		for (auto it : handlers_) {
 			delete it.second;
@@ -54,7 +50,6 @@ public:
 		{
 			// -1 只没有事件一直阻塞
 			int nfds = epoll_wait(epfd_, events, MAX_EVENTS, -1/*Timeout*/);
-
 			for (int i = 0; i < nfds; ++i) {
 				int fd = events[i].data.fd;
 				Handler* handler = handlers_[fd];
@@ -92,7 +87,7 @@ public:
 	}
 
 private:
-	eventLoop()
+	IOLoop()
 	{
 		epfd_ = epoll_create1(0);  //flag=0 等价于epll_craete
 		if (epfd_ < 0) {
@@ -106,15 +101,15 @@ private:
 	std::unordered_map<int, Handler*> handlers_;
 };
 
+
 class EchoHandler : public Handler {
 public:
 	EchoHandler() {}
 	virtual int handle(epoll_event e) override
 	{
-		std::cout << "e.events=" << e.events << std::endl;
 		int fd = e.data.fd;
 		if (e.events & EPOLLHUP) {
-			eventLoop::getInstance()->removeHandler(fd);
+			IOLoop::Instance()->removeHandler(fd);
 			return -1;
 		}
 
@@ -133,7 +128,7 @@ public:
 				}
 			}
 
-			eventLoop::getInstance()->modifyHandler(fd, EPOLLIN);
+			IOLoop::Instance()->modifyHandler(fd, EPOLLIN);
 		}
 
 		if (e.events & EPOLLIN)
@@ -152,10 +147,10 @@ public:
 			}
 
 			if (received > 0) {
-				eventLoop::getInstance()->modifyHandler(fd, EPOLLOUT);
+				IOLoop::Instance()->modifyHandler(fd, EPOLLOUT);
 			} else {
 				std::cout << "disconnect fd=" << fd << std::endl;
-				eventLoop::getInstance()->removeHandler(fd);
+				IOLoop::Instance()->removeHandler(fd);
 			}
 		}
 
@@ -198,7 +193,7 @@ public:
 		}
 		setnonblocking(fd);
 
-		eventLoop::getInstance()->addHandler(fd, this, EPOLLIN);
+		IOLoop::Instance()->addHandler(fd, this, EPOLLIN);
 	}
 
 	virtual int handle(epoll_event e) override
@@ -217,7 +212,7 @@ public:
 
 		std::cout << "accept connected: " << inet_ntoa(client_addr.sin_addr) << std::endl;
 		Handler* clientHandler = new EchoHandler();
-		eventLoop::getInstance()->addHandler(client, clientHandler, EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
+		IOLoop::Instance()->addHandler(client, clientHandler, EPOLLIN | EPOLLOUT | EPOLLHUP | EPOLLERR);
 		return 0;
 	}
 
@@ -228,7 +223,5 @@ private:
 		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 	}
 };
-
-
 
 #endif /* __EPOLLER_H__ */
