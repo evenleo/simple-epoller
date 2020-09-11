@@ -1,53 +1,57 @@
 #ifndef __EPOLLER_H__
 #define __EPOLLER_H__
 
-#include <string>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <sys/epoll.h>
-#include <stdio.h>
-#include <errno.h>
-#include <unistd.h>
 #include <memory>
+#include <functional>
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <string.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <unordered_map>
 
-class EpollCallback {
+
+class Noncopyable {
 public:
-	typedef std::shared_ptr<EpollCallback> Ptr;
-	EpollCallback() {};
-	virtual ~EpollCallback() {};
-	virtual void doEvent(struct epoll_event*) {};
+	Noncopyable(const Noncopyable& rhs) = delete;
+	Noncopyable& operator=(const Noncopyable& rhs) = delete;
+
+protected:
+	Noncopyable() = default;
+	~Noncopyable() = default;
 };
 
-class Epoller {
+class Callback {
 public:
-	typedef std::shared_ptr<Epoller> Ptr;
-	Epoller() : epollfd(-1) {}
-	virtual ~Epoller() { close(epollfd); };
-	int initServer(EpollCallback* cb, std::string hostName, int port, int socketType = SOCK_STREAM);
-	int connectServer(EpollCallback* cb, std::string hostName, int port, int socketType = SOCK_STREAM);
-	int socketBind(std::string hostName, int port, int socketType = SOCK_STREAM);
-	std::string getIpByHost(std::string hostName, int port);
-	void initEpool(int maxEvents = 1024);
+	typedef std::shared_ptr<Callback> ptr;
+	virtual ~Callback() {};
+	virtual void doEvent(struct epoll_event*) = 0;
+};
 
-	/**
-	 * state:
-	 * EPOLLIN ：表示对应的文件描述符可以读（包括对端SOCKET正常关闭）；
-	 * EPOLLOUT：表示对应的文件描述符可以写；
-	 * EPOLLPRI：表示对应的文件描述符有紧急的数据可读（这里应该表示有带外数据到来）；
-	 * EPOLLERR：表示对应的文件描述符发生错误；
-	 * EPOLLHUP：表示对应的文件描述符被挂断；
-	 * EPOLLET： 将EPOLL设为边缘触发(Edge Triggered)模式，这是相对于水平触发(Level Triggered)来说的。
-	 * EPOLLONESHOT：只监听一次事件，当监听完这次事件之后，如果还需要继续监听这个socket的话，需要再次把这个socket加入到EPOLL队列里
-	 */
-	bool addEvent(int fd, int state, EpollCallback* cb);
-	bool removeEvent(int fd, int state);
-	bool modifyEvent(int fd, int state, EpollCallback* cb);
-	void makeNonBlocking(int sfd);
-	void working(int maxEvents, int timeout = 100);
-	static std::string EpollFormat(std::string fmt, ...);
-	
+class Epoller : public Noncopyable {
+public:
+    typedef std::shared_ptr<Epoller> ptr;
+
+    Epoller();
+    ~Epoller();
+
+    int initServer(int port, Callback::ptr cb);
+    void start(int maxEvents, int timeout);
+    int connectServer(std::string ip, int port, Callback::ptr cb);
+
+    void addEvent(int fd, int events, Callback::ptr cb);
+    void removeEvent(int fd);
+    void modifyEvent(int fd, int events, Callback::ptr cb);
+
 private:
-	int epollfd;
+    void eventLoop(int maxEvents, int timeout);
+    void setnonblocking(int fd);
+
+private:
+    int epfd_ = -1;
+	std::unordered_map<int, Callback::ptr> callbacks_; 
 };
 
-#endif /* __EPOLLER_H__ */
+#endif
