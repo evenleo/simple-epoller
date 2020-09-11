@@ -4,9 +4,11 @@
 在linux下简单实现基于epoll echo服务器和客户端，旨在理解epoll的基本原理
 
 ## 环境
+```
 Linux version 4.15.0-117-generic
 Ubuntu 5.4.0-6ubuntu1~16.04.12
 gcc version 5.4.0
+```
 
 ## build
 ```
